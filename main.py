@@ -1,44 +1,67 @@
+import os
 import time
 import uuid
+import yaml
+import jwt
+from jwt import InvalidTokenError
+from dotenv import dotenv_values
 from fastapi import FastAPI, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import jwt
-from jwt import InvalidTokenError
 
 app = FastAPI()
 
-# ---- STEP 2a: CORS rule ----
-# This tells the browser: "only https://dash-4zh4el.example.com
-# is allowed to fetch this API from JavaScript."
+# =========================================================
+# PART 1: CORS + middleware (applies to the whole app)
+# =========================================================
 ALLOWED_ORIGIN = "https://dash-4zh4el.example.com"
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[ALLOWED_ORIGIN],   # NOT "*" — that would fail the grader
+    allow_origins=["*"],   # wildcard needed for Part 3's /effective-config;
+                            # Part 1's strict single-origin check is handled
+                            # manually below for the /stats route only.
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# ---- STEP 2b: Middleware for X-Request-ID and X-Process-Time ----
-# Middleware = code that runs before AND after every request,
-# no matter which endpoint was called.
 @app.middleware("http")
-async def add_custom_headers(request: Request, call_next):
+async def cors_and_headers(request: Request, call_next):
     start = time.time()
     request_id = str(uuid.uuid4())
+    origin = request.headers.get("origin")
 
-    response = await call_next(request)  # actually run the endpoint
+    # Handle preflight OPTIONS requests manually
+    if request.method == "OPTIONS":
+        response = JSONResponse(content={})
+    else:
+        response = await call_next(request)
 
     duration = time.time() - start
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Process-Time"] = f"{duration:.6f}"
+
+    path = request.url.path
+    if path == "/stats":
+        # Strict: only the assigned origin gets the header
+        if origin == ALLOWED_ORIGIN:
+            response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "*"
+    else:
+        # /effective-config and others: allow any origin
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+
     return response
 
-# ---- STEP 2c: The actual /stats endpoint ----
+
+# =========================================================
+# PART 1: GET /stats
+# =========================================================
 @app.get("/stats")
 def get_stats(values: str):
-    # values arrives as a string like "1,2,3,4"
     nums = [int(v.strip()) for v in values.split(",") if v.strip() != ""]
 
     count = len(nums)
@@ -46,7 +69,7 @@ def get_stats(values: str):
     mean = total / count if count > 0 else 0
 
     return {
-        "email": "25ds1000003@ds.study.iitm.ac.in",  # <-- put YOUR real email
+        "email": "25ds1000003@ds.study.iitm.ac.in",
         "count": count,
         "sum": total,
         "min": min(nums) if nums else None,
@@ -54,6 +77,10 @@ def get_stats(values: str):
         "mean": mean,
     }
 
+
+# =========================================================
+# PART 2: POST /verify
+# =========================================================
 ISSUER = "https://idp.exam.local"
 AUDIENCE = "tds-w8y92f1t.apps.exam.local"
 
@@ -72,24 +99,82 @@ def verify_token(payload: dict = Body(...)):
     token = payload.get("token", "")
 
     try:
-        # jwt.decode() does steps 1-4 all at once when you pass these arguments:
         claims = jwt.decode(
             token,
             PUBLIC_KEY,
-            algorithms=["RS256"],   # only accept RS256 — stops "alg confusion" attacks
-            audience=AUDIENCE,      # checks aud matches, rejects if not
-            issuer=ISSUER,          # checks iss matches, rejects if not
-            # exp is checked automatically by pyjwt whenever it's present
+            algorithms=["RS256"],
+            audience=AUDIENCE,
+            issuer=ISSUER,
         )
     except InvalidTokenError:
-        # This catches ALL failure cases: bad signature, expired,
-        # wrong audience, wrong issuer, tampered payload — anything wrong.
         return JSONResponse(status_code=401, content={"valid": False})
 
-    # If we get here, every check passed.
     return {
         "valid": True,
         "email": claims.get("email"),
         "sub": claims.get("sub"),
         "aud": claims.get("aud"),
     }
+
+
+# =========================================================
+# PART 3: GET /effective-config
+# =========================================================
+DEFAULTS = {
+    "port": 8000,
+    "workers": 1,
+    "debug": False,
+    "log_level": "info",
+    "api_key": "default-secret-000",
+}
+
+def load_yaml_layer():
+    try:
+        with open("config.development.yaml") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+
+def load_dotenv_layer():
+    raw = dotenv_values(".env")
+    result = {}
+    for key, value in raw.items():
+        if key == "NUM_WORKERS":
+            result["workers"] = value
+        elif key.startswith("APP_"):
+            clean_key = key[len("APP_"):].lower()
+            result[clean_key] = value
+    return result
+
+def load_os_env_layer():
+    result = {}
+    for key, value in os.environ.items():
+        if key.startswith("APP_"):
+            clean_key = key[len("APP_"):].lower()
+            result[clean_key] = value
+    return result
+
+def coerce(key, value):
+    if key in ("port", "workers"):
+        return int(value)
+    if key == "debug":
+        return str(value).strip().lower() in ("true", "1", "yes", "on")
+    return str(value)
+
+@app.get("/effective-config")
+def effective_config(request: Request):
+    merged = {}
+    merged.update(DEFAULTS)
+    merged.update(load_yaml_layer())
+    merged.update(load_dotenv_layer())
+    merged.update(load_os_env_layer())
+
+    for raw in request.query_params.getlist("set"):
+        if "=" in raw:
+            k, v = raw.split("=", 1)
+            merged[k.strip()] = v.strip()
+
+    final = {k: coerce(k, v) for k, v in merged.items()}
+    final["api_key"] = "****"
+
+    return final
