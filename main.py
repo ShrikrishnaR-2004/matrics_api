@@ -16,7 +16,7 @@ ALLOWED_ORIGIN = "https://dash-4zh4el.example.com"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[ALLOWED_ORIGIN],   # NOT "*" — that would fail the grader
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
