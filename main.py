@@ -6,32 +6,22 @@ import jwt
 from jwt import InvalidTokenError
 from dotenv import dotenv_values
 from fastapi import FastAPI, Request, Body
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
 # =========================================================
-# PART 1: CORS + middleware (applies to the whole app)
+# CORS + required headers — ONE middleware, handles everything
 # =========================================================
 ALLOWED_ORIGIN = "https://dash-4zh4el.example.com"
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # wildcard needed for Part 3's /effective-config;
-                            # Part 1's strict single-origin check is handled
-                            # manually below for the /stats route only.
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
 
 @app.middleware("http")
 async def cors_and_headers(request: Request, call_next):
     start = time.time()
     request_id = str(uuid.uuid4())
     origin = request.headers.get("origin")
+    path = request.url.path
 
-    # Handle preflight OPTIONS requests manually
     if request.method == "OPTIONS":
         response = JSONResponse(content={})
     else:
@@ -41,15 +31,16 @@ async def cors_and_headers(request: Request, call_next):
     response.headers["X-Request-ID"] = request_id
     response.headers["X-Process-Time"] = f"{duration:.6f}"
 
-    path = request.url.path
     if path == "/stats":
-        # Strict: only the assigned origin gets the header
+        # STRICT: only the exact assigned origin gets the header.
+        # Every other origin (including evil ones) gets NOTHING.
         if origin == ALLOWED_ORIGIN:
             response.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
             response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = "*"
+        # else: deliberately add nothing at all
     else:
-        # /effective-config and others: allow any origin
+        # /effective-config, /verify, etc: open to any origin
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = "*"
@@ -97,7 +88,6 @@ dQIDAQAB
 @app.post("/verify")
 def verify_token(payload: dict = Body(...)):
     token = payload.get("token", "")
-
     try:
         claims = jwt.decode(
             token,
